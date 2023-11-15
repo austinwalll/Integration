@@ -3,42 +3,9 @@ from datetime import datetime
 import json
 import base64
 import sqlite3
+import fitz
+import io
 
-
-semeq_api_key = 'REDACTED'
-limble_secret = 'REDACTED'
-limble_client_id = 'REDACTED'
-limble_credentials = f"{limble_client_id}:{limble_secret}"
-base64_credentials = base64.b64encode(limble_credentials.encode()).decode()
-
-# Initialize a list to store the report numbers of processed reports
-#processed_reports = []
-conn = sqlite3.connect('processed_reports.db')
-cursor = conn.cursor()
-
-# Create a table to store processed reports if it doesn't exist
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS processed_reports (
-        report_number INTEGER PRIMARY KEY
-    )
-''')
-conn.commit()
-
-
-# Define the API endpoint URL
-semeq_url = 'https://online.semeq-api.com/get-reports-detail-site?plant_id=000&page=0&limit=10'
-limble_url = 'https://api.limblecmms.com:443/v2/tasks/'
-
-
-semeq_params = {
-    'plant_id': '14622',  # Plant ID (Required) #14622 is MABE Saltillo #11681 is the old plant
-    'lang': 'EN',       # english language
-}
-# Define the headers
-semeq_headers = {
-    'x-api-key': semeq_api_key 
-}
- 
 def date_conversion(date_string):
     try:
         # Convert the date string to a datetime object
@@ -51,7 +18,230 @@ def date_conversion(date_string):
     except ValueError:
         # Handle invalid date strings
         return None
+    
+def extract_images(pdf_data, instruction_id, base64_credentials):
+    max_width = 1054
+    max_height = 1492
+    min_width = 256
+    min_height = 152
 
+    limble_url = f'REDACTED'
+    
+    try:
+        pdf_document = fitz.open("pdf", pdf_data)
+
+        for page_number in range(len(pdf_document)):
+            page = pdf_document[page_number]
+
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                base_image = pdf_document.extract_image(xref)
+                image_data = base_image["image"]
+
+                width, height = base_image["width"], base_image["height"]
+
+                if min_width < width < max_width and min_height < height < max_height:
+                    # Use an in-memory file-like object to avoid saving the image to disk
+                    img_file = io.BytesIO(image_data)
+
+                    limble_headers = {
+                        'Authorization': f'Basic {base64_credentials}'
+                    }
+                    payload = {}
+
+                    # Create a tuple containing the in-memory file
+                    files = [
+                        ('image', ('report.png', img_file, 'image/png'))
+                    ]
+
+                    # Make the PUT request with headers and files
+                    response = requests.put(limble_url, headers=limble_headers, data=payload, files=files)
+
+                    # if response.status_code == 200:
+                    #     print(f'Photo was added correctly to report: {report_number}')
+
+    except Exception as e:
+        print("An unexpected error occurred:", str(e))
+
+def instructions(instructions_url, report_number, headers, pdf_data, base64_credentials, area, sector, machine, equipment):
+    report_data ={
+        'type': 7,
+        'instruction': f'Report Number: {report_number}',
+        'parentInstructionID': 0
+
+    }
+
+    instruction_response = requests.post(instructions_url, headers=headers, json=report_data)
+    instruction = instruction_response.json()
+    instruction_id = instruction.get('instructionID')
+
+    extract_images(pdf_data, instruction_id, base64_credentials)
+
+    instructions_data ={
+        'type': 7,
+        'instruction': f'Area: {area} &ensp;&ensp;&ensp;&ensp;&ensp; Sector: {sector} &ensp;&ensp;&ensp;&ensp;&ensp; Machine: {machine} &ensp;&ensp;&ensp;&ensp;&ensp; Equipment: {equipment}',
+        'parentInstructionID': 0
+
+    }
+
+    instruction_response = requests.post(instructions_url, headers=headers, json=instructions_data)
+
+def input_vibration_instructions(instructions_url, headers, task_ID):
+    firstq_data = {
+        'type': 4,
+        'instruction': '01. Was the found defect the same as the diagnosed defect?',
+        'parentInstructionID': 0,
+    }
+    firstq_response = requests.post(instructions_url, headers=headers, json=firstq_data)
+    instruction = firstq_response.json()
+    firstq_ID = instruction.get('instructionID')
+
+
+    dropdown_options = [
+        'Yes',
+        'No, there was no defect',
+        'No, defect did not match the diagnosis',
+    ]
+
+
+    options1_url = f'REDACTED'
+    options1_ID = []
+
+    for option in dropdown_options:
+        
+        firstq_option = {
+            'instruction': option,
+        }
+        option_response = requests.post(options1_url, headers=headers, json=firstq_option)
+        options = option_response.json()
+        options1_ID.append(options.get('instructionOptionID'))
+      
+        
+
+    options_instructions = [
+        'Additional info',
+        'Additional info',
+        'Describe the defect that was found'
+    ]
+
+    count = 0
+    for option in options_instructions:
+        
+        option_data = {
+            'type': 3,
+            'instruction': option,
+            'parentInstructionID': firstq_ID,
+            'parentInstructionOptionID': options1_ID[count]
+        }
+        options1_response = requests.post(instructions_url, headers=headers, json=option_data)
+        count += 1
+
+
+    #second question
+    secondq_data = {
+        'type': 4,
+        'instruction': '02. Is the specification of the defective component completely correct? Is the tag / legacy ID information complete and correct?',
+        'parentInstructionID': 0
+    }
+    secondq_response = requests.post(instructions_url, headers=headers, json=secondq_data)
+    instruction = secondq_response.json()
+    secondq_ID = instruction.get('instructionID')
+
+    dropdown2_options = [
+        'Yes',
+        'No',
+    ]
+
+    options2_url = f'REDACTED'
+    options2_ID = []
+
+    for option in dropdown2_options:
+        
+        secondq_option = {
+            'instruction': option,
+        }
+        option2_response = requests.post(options2_url, headers=headers, json=secondq_option)
+        options = option2_response.json()
+        options2_ID.append(options.get('instructionOptionID'))
+
+    option_data = {
+            'type': 3,
+            'instruction': 'Which ones are correct?',
+            'parentInstructionID': secondq_ID,
+            'parentInstructionOptionID': options2_ID[1]
+        }
+    options2_response = requests.post(instructions_url, headers=headers, json=option_data)
+
+    #third question
+    thirdq_data = {
+        'type': 4,
+        'instruction': '03. Was the indicated position of the defective component correct?',
+        'parentInstructionID': 0
+    }
+    thirdq_response = requests.post(instructions_url, headers=headers, json=thirdq_data)
+    instruction = thirdq_response.json()
+    thirdq_ID = instruction.get('instructionID')
+
+    dropdown3_options = [
+        'Yes',
+        'No',
+    ]
+
+    options3_url = f'REDACTED'
+    options3_ID = []
+
+    for option in dropdown3_options:
+        
+        thirdq_option = {
+            'instruction': option,
+        }
+        option3_response = requests.post(options3_url, headers=headers, json=thirdq_option)
+        options = option3_response.json()
+        options3_ID.append(options.get('instructionOptionID'))
+
+    option_data = {
+            'type': 3,
+            'instruction': 'What is the correct one?',
+            'parentInstructionID': thirdq_ID,
+            'parentInstructionOptionID': options3_ID[1]
+        }
+    options3_response = requests.post(instructions_url, headers=headers, json=option_data)
+
+        #fourth question
+    fourthq_data = {
+        'type': 4,
+        'instruction': '04. Was any other intervention performed, in addition to the recommended intervention?',
+        'parentInstructionID': 0
+    }
+    fourthq_response = requests.post(instructions_url, headers=headers, json=fourthq_data)
+    instruction = fourthq_response.json()
+    fourthq_ID = instruction.get('instructionID')
+
+    options4_url = f'REDACTED'
+    options4_ID = []
+
+    dropdown4_options = [
+        'No',
+        'Yes ',
+    ]
+
+
+    for option in dropdown4_options:
+        
+        fourthq_option = {
+            'instruction': option,
+        }
+        option4_response = requests.post(options4_url, headers=headers, json=fourthq_option)
+        options = option4_response.json()
+        options4_ID.append(options.get('instructionOptionID'))
+
+    option_data = {
+            'type': 3,
+            'instruction': 'What?',
+            'parentInstructionID': fourthq_ID,
+            'parentInstructionOptionID': options4_ID[1]
+        }
+    options4_response = requests.post(instructions_url, headers=headers, json=option_data)
 
 def process_new_reports():
     page = 0
@@ -72,7 +262,6 @@ def process_new_reports():
 
 
                 if not existing_report:
-                    #print(report)
                     # Process the new report here by sending info to limble and making a new task
                     defect = report.get('defect')
                     technique = report.get('technique')
@@ -96,7 +285,7 @@ def process_new_reports():
                     
                     payload = {
                         'name': f'Work on {defect} based on {technique}',
-                        'locationID': '46198',
+                        'locationID': 'REDACTED',
                         'due': due,
                         'type': 6,
                         'description': description,
@@ -107,7 +296,7 @@ def process_new_reports():
                     limble_response = requests.post(limble_url, headers=headers, data=json.dumps(payload), timeout=60)
                     
                     # Check the response status code
-                    if limble_response.status_code == 200:  # HTTP 200 means success, but the response body might be empty
+                    if limble_response.status_code == 200: 
                         task_data = limble_response.json()
                         if not task_data:
                             print("The API response body is empty.")
@@ -119,9 +308,9 @@ def process_new_reports():
                     else:
                         print(f"Failed to create a new task on Limble. Status code: {limble_response.status_code}")
                         return None
-                    #get task to get task id
                     
-                    get_url = f'https://api.limblecmms.com:443/v2/tasks/?meta1={report_number}&meta2={token}'
+                    #get task to get task id
+                    get_url = f'REDACTED'
 
                     task_response = requests.get(get_url, headers=headers)
                     if task_response.status_code == 200:
@@ -132,184 +321,20 @@ def process_new_reports():
                         print(f"Failed to get the Task from Limble. Status code {task_response.status_code}")
 
                     #Add fields as instructions
+                    pdf_url = f'REDACTED'
+                    payload={}
+                    pdf_response = requests.get(pdf_url, headers=semeq_headers, data=payload)
+                    if pdf_response.status_code == 200:
+                        pdf_data = pdf_response.content
 
                     instructions_url = f'https://api.limblecmms.com:443/v2/tasks/{task_ID}/instructions/'
-
-                    report_data ={
-                        'type': 7,
-                        'instruction': f'Report Number: {report_number}',
-                        'parentInstructionID': 0
-
-                    }
-
-                    instruction_response = requests.post(instructions_url, headers=headers, json=report_data)
-
-                    instructions_data ={
-                        'type': 7,
-                        'instruction': f'Area: {area} &ensp;&ensp;&ensp;&ensp;&ensp; Sector: {sector} &ensp;&ensp;&ensp;&ensp;&ensp; Machine: {machine} &ensp;&ensp;&ensp;&ensp;&ensp; Equipment: {equipment}',
-                        'parentInstructionID': 0
-
-                    }
-
-                    instruction_response = requests.post(instructions_url, headers=headers, json=instructions_data)
-
+                    
+                    #add the first 2 instructions + photos
+                    instructions(instructions_url, report_number, headers, pdf_data, base64_credentials, area, sector, machine, equipment)
 
                 
-            # first question for the instructions
-                    firstq_data = {
-                        'type': 4,
-                        'instruction': '01. Was the found defect the same as the diagnosed defect?',
-                        'parentInstructionID': 0,
-                    }
-                    firstq_response = requests.post(instructions_url, headers=headers, json=firstq_data)
-                    instruction = firstq_response.json()
-                    firstq_ID = instruction.get('instructionID')
-
-
-                    dropdown_options = [
-                        'Yes',
-                        'No, there was no defect',
-                        'No, defect did not match the diagnosis',
-                    ]
-
-
-                    options1_url = f'https://api.limblecmms.com:443/v2/tasks/{task_ID}/instructions/{firstq_ID}/options'
-                    options1_ID = []
-
-                    for option in dropdown_options:
-                        
-                        firstq_option = {
-                            'instruction': option,
-                        }
-                        option_response = requests.post(options1_url, headers=headers, json=firstq_option)
-                        options = option_response.json()
-                        options1_ID.append(options.get('instructionOptionID'))
-                        
-
-                    options_instructions = [
-                        'Additional info',
-                        'Additional info',
-                        'Describe the defect that was found'
-                    ]
-
-                    count = 0
-                    for option in options_instructions:
-                        
-                        option_data = {
-                            'type': 3,
-                            'instruction': option,
-                            'parentInstructionID': firstq_ID,
-                            'parentInstructionOptionID': options1_ID[count]
-                        }
-                        options1_response = requests.post(instructions_url, headers=headers, json=option_data)
-                        count += 1
-
-
-                    #second question
-                    secondq_data = {
-                        'type': 4,
-                        'instruction': '02. Is the specification of the defective component completely correct? Is the tag / legacy ID information complete and correct?',
-                        'parentInstructionID': 0
-                    }
-                    secondq_response = requests.post(instructions_url, headers=headers, json=secondq_data)
-                    instruction = secondq_response.json()
-                    secondq_ID = instruction.get('instructionID')
-                  
-                    dropdown2_options = [
-                        'Yes',
-                        'No',
-                    ]
-
-                    options2_url = f'https://api.limblecmms.com:443/v2/tasks/{task_ID}/instructions/{secondq_ID}/options'
-                    options2_ID = []
-
-                    for option in dropdown2_options:
-                        
-                        secondq_option = {
-                            'instruction': option,
-                        }
-                        option2_response = requests.post(options2_url, headers=headers, json=secondq_option)
-                        options = option2_response.json()
-                        options2_ID.append(options.get('instructionOptionID'))
-
-                    option_data = {
-                            'type': 3,
-                            'instruction': 'Which ones are correct?',
-                            'parentInstructionID': secondq_ID,
-                            'parentInstructionOptionID': options2_ID[1]
-                        }
-                    options2_response = requests.post(instructions_url, headers=headers, json=option_data)
-
-                    #third question
-                    thirdq_data = {
-                        'type': 4,
-                        'instruction': '03. Was the indicated position of the defective component correct?',
-                        'parentInstructionID': 0
-                    }
-                    thirdq_response = requests.post(instructions_url, headers=headers, json=thirdq_data)
-                    instruction = thirdq_response.json()
-                    thirdq_ID = instruction.get('instructionID')
-                  
-                    dropdown3_options = [
-                        'Yes',
-                        'No',
-                    ]
-
-                    options3_url = f'https://api.limblecmms.com:443/v2/tasks/{task_ID}/instructions/{thirdq_ID}/options'
-                    options3_ID = []
-
-                    for option in dropdown3_options:
-                        
-                        thirdq_option = {
-                            'instruction': option,
-                        }
-                        option3_response = requests.post(options3_url, headers=headers, json=thirdq_option)
-                        options = option3_response.json()
-                        options3_ID.append(options.get('instructionOptionID'))
-
-                    option_data = {
-                            'type': 3,
-                            'instruction': 'What is the correct one?',
-                            'parentInstructionID': thirdq_ID,
-                            'parentInstructionOptionID': options3_ID[1]
-                        }
-                    options3_response = requests.post(instructions_url, headers=headers, json=option_data)
-
-                     #fourth question
-                    fourthq_data = {
-                        'type': 4,
-                        'instruction': '04. Was any other intervention performed, in addition to the recommended intervention?',
-                        'parentInstructionID': 0
-                    }
-                    fourthq_response = requests.post(instructions_url, headers=headers, json=fourthq_data)
-                    instruction = fourthq_response.json()
-                    fourthq_ID = instruction.get('instructionID')
-
-                    options4_url = f'https://api.limblecmms.com:443/v2/tasks/{task_ID}/instructions/{fourthq_ID}/options'
-                    options4_ID = []
-                  
-                    dropdown4_options = [
-                        'No',
-                        'Yes ',
-                    ]
-
-
-                    for option in dropdown4_options:
-                        
-                        fourthq_option = {
-                            'instruction': option,
-                        }
-                        option4_response = requests.post(options4_url, headers=headers, json=fourthq_option)
-                        options = option4_response.json()
-                        options4_ID.append(options.get('instructionOptionID'))
-
-                    option_data = {
-                            'type': 3,
-                            'instruction': 'What?',
-                            'parentInstructionID': fourthq_ID,
-                            'parentInstructionOptionID': options4_ID[1]
-                        }
-                    options4_response = requests.post(instructions_url, headers=headers, json=option_data)
+                    if technique == 'VIBRATION ANALYSIS':
+                        input_vibration_instructions(instructions_url, headers, task_ID)
 
 
                     # Add the report_number to the processed_reports list
@@ -320,7 +345,39 @@ def process_new_reports():
             print(f"Request failed connecting with SEMEQ. Status code: {response.status_code}")
             break
 
-  
+semeq_api_key = 'REDACTED'
+limble_secret = 'REDACTED'
+limble_client_id = 'REDACTED'
+limble_credentials = f"{limble_client_id}:{limble_secret}"
+base64_credentials = base64.b64encode(limble_credentials.encode()).decode()
+
+# Initialize a list to store the report numbers of processed reports
+#processed_reports = []
+conn = sqlite3.connect('processed_reports.db')
+cursor = conn.cursor()
+
+# Create a table to store processed reports if it doesn't exist
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS processed_reports (
+        report_number INTEGER PRIMARY KEY
+    )
+''')
+conn.commit()
+
+# Define the API endpoint URL
+semeq_url = 'REDACTED'
+limble_url = 'REDACTED'
+
+semeq_params = {
+    'plant_id': 'REDACTED',  
+    'lang': 'EN',       # english language
+}
+
+# Define the headers
+semeq_headers = {
+    'x-api-key': semeq_api_key 
+}
+
 process_new_reports()
 
 conn.close()
